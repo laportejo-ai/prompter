@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Voice Prompter</title>
+<style>
+/* VOICE: quiet tool, black stage, text first
+   IDEA: a studio teleprompter glass
+   PICTURE: the script itself, huge, with an orange reading word
+   COLOUR and TYPE: black, white, grey for read words, orange accent; system sans
+   LAYOUT: edit screen (one column) -> full-screen stage with a thin top bar */
+:root{--bg:#000;--ink:#fff;--done:#5c5c5c;--hot:#ff9a1f;--bar:#141414;--line:#2a2a2a}
+*{box-sizing:border-box;min-width:0}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:17px/1.5 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%}
+button{font:inherit;color:inherit;background:#222;border:1px solid #333;border-radius:12px;min-height:44px;padding:0 16px;cursor:pointer}
+button:focus-visible,textarea:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+button.go{background:var(--hot);color:#000;border:0;font-weight:600}
+.hide{display:none!important}
+#edit{max-width:900px;margin:0 auto;padding:max(24px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) 24px max(20px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:14px;min-height:100%}
+h1{font-size:32px;line-height:1.05;margin:0}
+p.hint{margin:0;color:#aaa}
+textarea{flex:1;min-height:45vh;width:100%;background:#0d0d0d;color:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;font:18px/1.5 inherit;font-family:inherit;resize:vertical}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.row label{color:#aaa}
+input[type=range]{width:200px;accent-color:var(--hot)}
+#err{color:#ff8a7a}
+#stage{position:fixed;inset:0;display:flex;flex-direction:column}
+#bar{display:flex;gap:8px;align-items:center;padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left));background:var(--bar);border-bottom:1px solid var(--line)}
+#bar .sp{flex:1}
+#status{display:flex;align-items:center;gap:8px;color:#aaa;font-size:15px;white-space:nowrap}
+#dot{width:12px;height:12px;border-radius:50%;background:#555}
+#dot.on{background:#ff3b30;box-shadow:0 0 0 0 #ff3b3088;animation:p 1.4s infinite}
+@keyframes p{70%{box-shadow:0 0 0 10px #ff3b3000}}
+@media (prefers-reduced-motion:reduce){#dot.on{animation:none}}
+#scroller{flex:1;overflow-y:auto;position:relative;-webkit-overflow-scrolling:touch}
+#text{padding:35vh 6vw 70vh;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+#text span{color:var(--ink);transition:color .15s}
+#text span.d{color:var(--done)}
+#text span.c{color:var(--hot)}
+#guide{position:absolute;left:0;right:0;top:calc(35% + 56px);height:0;border-top:2px dashed #ff9a1f33;pointer-events:none}
+#msg{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#222;border:1px solid #444;padding:10px 16px;border-radius:12px;max-width:90vw;color:#ffd7a8}
+</style>
+</head>
+<body>
+<section id="edit">
+  <h1>Voice Prompter</h1>
+  <p class="hint">Paste the script, then press Start. The text scrolls and highlights as you read it aloud (English).</p>
+  <textarea id="src" spellcheck="false" placeholder="Paste your script here…"></textarea>
+  <div class="row">
+    <label for="size">Text size</label>
+    <input id="size" type="range" min="32" max="110" step="2" value="64">
+    <span id="sizev">64</span>
+    <span style="flex:1"></span>
+    <button id="clear">Clear</button>
+    <button id="start" class="go">Start</button>
+  </div>
+  <p id="err" class="hide"></p>
+</section>
+
+<section id="stage" class="hide">
+  <div id="bar">
+    <button id="back">Edit</button>
+    <button id="mic" class="go">Start mic</button>
+    <button id="top">From top</button>
+    <span class="sp"></span>
+    <button id="smaller" aria-label="Smaller text">A−</button>
+    <button id="bigger" aria-label="Bigger text">A+</button>
+    <span id="status"><span id="dot"></span><span id="stxt">Mic off</span></span>
+  </div>
+  <div id="scroller"><div id="text"></div></div>
+  <div id="guide"></div>
+</section>
+<div id="msg" class="hide"></div>
+
+<script>
+{
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d){ try{ const v = localStorage.getItem('vp_'+k); return v===null ? d : v }catch(e){ return d } },
+  set(k, v){ try{ localStorage.setItem('vp_'+k, v) }catch(e){} }
+};
+const SAMPLE = "Hi, I'm Masha, garden designer at ORMA. Today I want to show you how we turn a small city garden into a green room you can live in. It starts with a simple question: how do you want to use the space? From there, we choose plants that look good in every season.";
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let tokens = [];   // {el, n} words with a normalized form
+let pos = 0;       // index of next expected word
+let rec = null, listening = false, wake = null, msgT;
+
+const norm = w => w.toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]/g,'');
+const numWords = {zero:'0',one:'1',two:'2',three:'3',four:'4',five:'5',six:'6',seven:'7',eight:'8',nine:'9',ten:'10'};
+const canon = w => numWords[w] || w;
+
+function lev(a, b){
+  if (Math.abs(a.length-b.length) > 1) return 2;
+  const m = a.length, n = b.length; let prev = Array.from({length:n+1},(_, j)=>j);
+  for (let i=1;i<=m;i++){ const cur=[i]; for (let j=1;j<=n;j++) cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1)); prev=cur }
+  return prev[n];
+}
+function sim(a, b){
+  a = canon(a); b = canon(b);
+  if (a === b) return true;
+  if (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) return true;
+  if (a.length >= 5 && b.length >= 5 && lev(a, b) <= 1) return true;
+  return false;
+}
+// longest common subsequence length between spoken words and a script slice
+function lcs(s, t){
+  let prev = new Array(t.length+1).fill(0);
+  for (let i=1;i<=s.length;i++){ const cur=[0]; for (let j=1;j<=t.length;j++) cur[j] = sim(s[i-1], t[j-1]) ? prev[j-1]+1 : Math.max(prev[j], cur[j-1]); prev=cur }
+  return prev[t.length];
+}
+
+function build(){
+  const text = $('src').value.trim() || SAMPLE;
+  const box = $('text'); box.innerHTML = ''; tokens = [];
+  text.split(/(\s+)/).forEach(part => {
+    if (!part) return;
+    if (/^\s+$/.test(part)){
+      if (/\n/.test(part)) { box.appendChild(document.createElement('br')); if (/\n\s*\n/.test(part)) box.appendChild(document.createElement('br')); }
+      else box.appendChild(document.createTextNode(' '));
+      return;
+    }
+    const el = document.createElement('span'); el.textContent = part; box.appendChild(el);
+    const n = norm(part);
+    if (n){ const i = tokens.length; tokens.push({el, n}); el.addEventListener('click', () => { pos = i; paint(true) }) }
+  });
+  pos = 0; paint(true);
+}
+
+function paint(force){
+  tokens.forEach((t, i) => { t.el.className = i < pos-1 ? 'd' : i === pos-1 ? 'c' : '' });
+  const ref = tokens[Math.max(0, pos-1)];
+  if (!ref) return;
+  const sc = $('scroller');
+  const target = ref.el.offsetTop - sc.clientHeight*0.35 + ref.el.offsetHeight/2;
+  if (force || Math.abs(sc.scrollTop - target) > 4) sc.scrollTo({top: Math.max(0, target), behavior: 'smooth'});
+}
+
+function follow(transcript){
+  const spoken = transcript.split(/\s+/).map(norm).filter(Boolean).slice(-6);
+  if (!spoken.length || !tokens.length) return;
+  const script = tokens.map(t => t.n);
+  const last2 = spoken.slice(-2);
+  let best = -1, bestScore = 0;
+  const lo = Math.max(0, pos-2), hi = Math.min(script.length-1, pos+40);
+  for (let e = lo; e <= hi; e++){
+    if (!last2.some(w => sim(w, script[e]))) continue;          // anchor: the word just said
+    const s = lcs(spoken, script.slice(Math.max(0, e-7), e+1)) - 0.03*Math.abs(e-pos);
+    if (s > bestScore + 0.001){ bestScore = s; best = e }
+  }
+  if (best < 0) return;
+  const raw = bestScore + 0.03*Math.abs(best-pos);
+  const ok = raw >= 2 || (best - pos <= 1 && script[best].length >= 3) || (spoken.length === 1 && best - pos <= 2);
+  if (ok && best + 1 > pos){ pos = best + 1; paint(false) }
+}
+
+function say(t){ const m=$('msg'); m.textContent=t; m.classList.remove('hide'); clearTimeout(msgT); msgT=setTimeout(()=>m.classList.add('hide'), 6000) }
+function setState(on){
+  listening = on; $('dot').classList.toggle('on', on);
+  $('stxt').textContent = on ? 'Listening' : 'Mic off';
+  $('mic').textContent = on ? 'Pause mic' : 'Start mic';
+}
+
+function startRec(){
+  if (!SR){ say('Speech recognition is not available here. Open this page in Safari on the iPad, with Siri & Dictation turned on.'); return }
+  rec = new SR(); rec.lang = 'en-US'; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
+  rec.onresult = e => { let t=''; for (let i=0;i<e.results.length;i++) t += ' ' + e.results[i][0].transcript; follow(t) };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed'){ setState(false); say('Microphone blocked. iPad Settings → Safari → Microphone → Allow, and turn on Siri & Dictation.') }
+    else if (e.error !== 'no-speech' && e.error !== 'aborted') say('Mic: ' + e.error);
+  };
+  rec.onend = () => { if (listening) setTimeout(() => { if (listening) try{ rec.start() }catch(_){} }, 200) };  // Safari stops often: restart
+  try{ rec.start(); setState(true) }catch(e){ say('Could not start the mic: ' + e.message) }
+  if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(w => wake = w).catch(()=>{});
+}
+function stopRec(){ setState(false); if (rec) try{ rec.stop() }catch(e){} ; if (wake){ wake.release().catch(()=>{}); wake=null } }
+
+function setSize(px){
+  px = Math.max(32, Math.min(110, px)); $('size').value = px; $('sizev').textContent = px;
+  $('text').style.fontSize = px + 'px'; store.set('size', px); paint(true);
+}
+
+$('src').value = store.get('text', SAMPLE);
+setSize(+store.get('size', 64));
+$('src').addEventListener('input', () => store.set('text', $('src').value));
+$('size').addEventListener('input', e => setSize(+e.target.value));
+$('clear').addEventListener('click', () => { $('src').value=''; store.set('text',''); $('src').focus() });
+$('start').addEventListener('click', () => {
+  $('edit').classList.add('hide'); $('stage').classList.remove('hide');
+  build(); startRec();
+});
+$('back').addEventListener('click', () => { stopRec(); $('stage').classList.add('hide'); $('edit').classList.remove('hide') });
+$('mic').addEventListener('click', () => listening ? stopRec() : startRec());
+$('top').addEventListener('click', () => { pos = 0; paint(true) });
+$('smaller').addEventListener('click', () => setSize(+$('size').value - 6));
+$('bigger').addEventListener('click', () => setSize(+$('size').value + 6));
+document.addEventListener('visibilitychange', () => { if (document.hidden && listening) stopRec() });
+if (!SR){ const e=$('err'); e.textContent='This browser has no speech recognition. Use Safari on iPad (iPadOS 14.5+) with Siri & Dictation on.'; e.classList.remove('hide') }
+}
+</script>
+</body>
+</html>
