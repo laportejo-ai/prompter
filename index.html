@@ -37,7 +37,7 @@ input[type=range]{width:200px;accent-color:var(--hot)}
 @media (prefers-reduced-motion:reduce){#dot.on{animation:none}}
 #scroller{flex:1;overflow-y:auto;position:relative;-webkit-overflow-scrolling:touch}
 #text{padding:35vh 6vw 70vh;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
-#text span{color:var(--ink);transition:color .15s}
+#text span{color:var(--ink)}
 #text span.d{color:var(--done)}
 #text span.c{color:var(--hot)}
 #guide{position:absolute;left:0;right:0;top:calc(35% + 56px);height:0;border-top:2px dashed #ff9a1f33;pointer-events:none}
@@ -125,36 +125,59 @@ function build(){
     }
     const el = document.createElement('span'); el.textContent = part; box.appendChild(el);
     const n = norm(part);
-    if (n){ const i = tokens.length; tokens.push({el, n}); el.addEventListener('click', () => { pos = i; paint(true) }) }
+    if (n){ const i = tokens.length; tokens.push({el, n}); el.addEventListener('click', () => { pos = i; heard = 1e9; paint(true) }) }
   });
   pos = 0; paint(true);
 }
 
+let lastLineTop = -1, anim = 0;
+function scrollToY(y){                       // short custom scroll: snappier than Safari's smooth scroll
+  const sc = $('scroller'), from = sc.scrollTop, d = y - from, t0 = performance.now();
+  cancelAnimationFrame(anim);
+  const step = now => { const k = Math.min(1, (now - t0)/180); sc.scrollTop = from + d*(1-(1-k)**3); if (k < 1) anim = requestAnimationFrame(step) };
+  anim = requestAnimationFrame(step);
+}
+let painted = 0;
 function paint(force){
-  tokens.forEach((t, i) => { t.el.className = i < pos-1 ? 'd' : i === pos-1 ? 'c' : '' });
+  if (force){ tokens.forEach((t, i) => t.el.className = i < pos-1 ? 'd' : i === pos-1 ? 'c' : ''); }
+  else { for (let i = Math.max(0, painted-2); i < Math.min(tokens.length, pos+1); i++) tokens[i].el.className = i < pos-1 ? 'd' : i === pos-1 ? 'c' : '' }
+  painted = pos;
   const ref = tokens[Math.max(0, pos-1)];
   if (!ref) return;
   const sc = $('scroller');
-  const target = ref.el.offsetTop - sc.clientHeight*0.35 + ref.el.offsetHeight/2;
-  if (force || Math.abs(sc.scrollTop - target) > 4) sc.scrollTo({top: Math.max(0, target), behavior: 'smooth'});
+  if (force || ref.el.offsetTop !== lastLineTop){
+    lastLineTop = ref.el.offsetTop;
+    const y = Math.max(0, ref.el.offsetTop - sc.clientHeight*0.35 + ref.el.offsetHeight/2);
+    if (force) sc.scrollTop = y; else scrollToY(y);
+  }
 }
 
-function follow(transcript){
-  const spoken = transcript.split(/\s+/).map(norm).filter(Boolean).slice(-6);
-  if (!spoken.length || !tokens.length) return;
-  const script = tokens.map(t => t.n);
-  const last2 = spoken.slice(-2);
-  let best = -1, bestScore = 0;
-  const lo = Math.max(0, pos-2), hi = Math.min(script.length-1, pos+40);
-  for (let e = lo; e <= hi; e++){
-    if (!last2.some(w => sim(w, script[e]))) continue;          // anchor: the word just said
-    const s = lcs(spoken, script.slice(Math.max(0, e-7), e+1)) - 0.03*Math.abs(e-pos);
-    if (s > bestScore + 0.001){ bestScore = s; best = e }
+// Word-by-word following. Unknown words are ignored: the prompter waits on the
+// expected word until the reader says it. Only small gaps are bridged.
+let heard = 0;                 // spoken words of the current recognition session already used
+function matchAt(spoken, k, isLast){
+  const w = spoken[k], exp = tokens[pos] && tokens[pos].n;
+  if (!exp) return -1;
+  if (sim(w, exp) || (isLast && w.length >= 3 && exp.startsWith(w))) return 0;
+  for (let j = 1; j <= 2 && pos + j < tokens.length; j++){            // recognizer dropped 1-2 words
+    if (!sim(w, tokens[pos+j].n)) continue;
+    const skipped = tokens.slice(pos, pos+j).map(t => t.n);
+    const prevOk = k > 0 && sim(spoken[k-1], tokens[pos+j-1].n);
+    if (prevOk || skipped.every(x => x.length <= 3)) return j;
   }
-  if (best < 0) return;
-  const raw = bestScore + 0.03*Math.abs(best-pos);
-  const ok = raw >= 2 || (best - pos <= 1 && script[best].length >= 3) || (spoken.length === 1 && best - pos <= 2);
-  if (ok && best + 1 > pos){ pos = best + 1; paint(false) }
+  return -1;
+}
+function follow(transcript){
+  const spoken = transcript.split(/\s+/).map(norm).filter(Boolean);
+  if (spoken.length < heard) heard = spoken.length;
+  let moved = false;
+  for (let k = heard; k < spoken.length; k++){
+    const isLast = k === spoken.length - 1;
+    const j = matchAt(spoken, k, isLast);
+    if (j >= 0){ pos += j + 1; heard = k + 1; moved = true }
+    else if (!isLast) heard = k + 1;        // wrong word: drop it, stay in place
+  }
+  if (moved) paint(false);
 }
 
 function say(t){ const m=$('msg'); m.textContent=t; m.classList.remove('hide'); clearTimeout(msgT); msgT=setTimeout(()=>m.classList.add('hide'), 6000) }
@@ -167,6 +190,7 @@ function setState(on){
 function startRec(){
   if (!SR){ say('Speech recognition is not available here. Open this page in Safari on the iPad, with Siri & Dictation turned on.'); return }
   rec = new SR(); rec.lang = 'en-US'; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
+  rec.onstart = () => { heard = 0 };
   rec.onresult = e => { let t=''; for (let i=0;i<e.results.length;i++) t += ' ' + e.results[i][0].transcript; follow(t) };
   rec.onerror = e => {
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed'){ setState(false); say('Microphone blocked. iPad Settings → Safari → Microphone → Allow, and turn on Siri & Dictation.') }
@@ -194,7 +218,7 @@ $('start').addEventListener('click', () => {
 });
 $('back').addEventListener('click', () => { stopRec(); $('stage').classList.add('hide'); $('edit').classList.remove('hide') });
 $('mic').addEventListener('click', () => listening ? stopRec() : startRec());
-$('top').addEventListener('click', () => { pos = 0; paint(true) });
+$('top').addEventListener('click', () => { pos = 0; heard = 1e9; paint(true) });
 $('smaller').addEventListener('click', () => setSize(+$('size').value - 6));
 $('bigger').addEventListener('click', () => setSize(+$('size').value + 6));
 document.addEventListener('visibilitychange', () => { if (document.hidden && listening) stopRec() });
