@@ -47,7 +47,7 @@ input[type=range]{width:200px;accent-color:var(--hot)}
 <body>
 <section id="edit">
   <h1>Voice Prompter</h1>
-  <p class="hint">Paste the script, then press Start. The text scrolls and highlights as you read it aloud (English).</p>
+  <p class="hint">Paste the script, then press Start. The text scrolls and highlights as you read it aloud (English).<br>Voice commands: say <b>“stop stop stop”</b> to go back to the top, <b>“back back back”</b> for the previous sentence.</p>
   <textarea id="src" spellcheck="false" placeholder="Paste your script here…"></textarea>
   <div class="row">
     <label for="size">Text size</label>
@@ -125,7 +125,7 @@ function build(){
     }
     const el = document.createElement('span'); el.textContent = part; box.appendChild(el);
     const n = norm(part);
-    if (n){ const i = tokens.length; tokens.push({el, n, name: /^[^A-Za-zÀ-ɏ]*[A-ZÀ-Þ]/.test(part)}); el.addEventListener('click', () => { pos = i; heard = 1e9; paint(true) }) }
+    if (n){ const i = tokens.length; tokens.push({el, n, end: /[.!?…]["'”’)\]]*$/.test(part), name: /^[^A-Za-zÀ-ɏ]*[A-ZÀ-Þ]/.test(part)}); el.addEventListener('click', () => { pos = i; heard = 1e9; paint(true) }) }
   });
   pos = 0; paint(true);
 }
@@ -170,9 +170,29 @@ function matchAt(spoken, k, isLast){
   }
   return -1;
 }
+// Voice commands: the same word said three times in a row.
+const CMDS = {stop:'top', stopp:'top', stops:'top', back:'back', bak:'back', bac:'back', backs:'back'};
+let cmdFrom = 0;
+function command(c){
+  if (c === 'top'){ pos = 0; say('↺ Back to the top') }
+  else {
+    let s = Math.min(pos, tokens.length - 1);
+    while (s > 0 && !tokens[s-1].end) s--;           // start of the current sentence
+    let p = Math.max(0, s - 1);
+    while (p > 0 && !tokens[p-1].end) p--;           // start of the previous one
+    pos = p; say('← Previous sentence');
+  }
+  paint(true);
+}
 function follow(transcript){
   const spoken = transcript.split(/\s+/).map(norm).filter(Boolean);
   if (spoken.length < heard) heard = spoken.length;
+  if (spoken.length < cmdFrom) cmdFrom = spoken.length;
+  for (let k = cmdFrom; k + 2 < spoken.length; k++){
+    const c = CMDS[spoken[k]];
+    if (c && c === CMDS[spoken[k+1]] && c === CMDS[spoken[k+2]]){ command(c); heard = Math.max(heard, k + 3); cmdFrom = k + 3; k += 2 }
+  }
+  cmdFrom = Math.max(cmdFrom, spoken.length - 2);
   let moved = false;
   for (let k = heard; k < spoken.length; k++){
     const isLast = k === spoken.length - 1;
@@ -193,7 +213,7 @@ function setState(on){
 function startRec(){
   if (!SR){ say('Speech recognition is not available here. Open this page in Safari on the iPad, with Siri & Dictation turned on.'); return }
   rec = new SR(); rec.lang = 'en-US'; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
-  rec.onstart = () => { heard = 0 };
+  rec.onstart = () => { heard = 0; cmdFrom = 0 };
   rec.onresult = e => { let t=''; for (let i=0;i<e.results.length;i++) t += ' ' + e.results[i][0].transcript; follow(t) };
   rec.onerror = e => {
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed'){ setState(false); say('Microphone blocked. iPad Settings → Safari → Microphone → Allow, and turn on Siri & Dictation.') }
