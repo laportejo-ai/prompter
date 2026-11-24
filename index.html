@@ -89,7 +89,7 @@ let tokens = [];   // {el, n} words with a normalized form
 let pos = 0;       // index of next expected word
 let rec = null, listening = false, wake = null, msgT;
 
-const norm = w => w.toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]/g,'');
+const norm = w => w.normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/[’']/g,'').replace(/[^a-z0-9]/g,'');
 const numWords = {zero:'0',one:'1',two:'2',three:'3',four:'4',five:'5',six:'6',seven:'7',eight:'8',nine:'9',ten:'10'};
 const canon = w => numWords[w] || w;
 
@@ -125,7 +125,7 @@ function build(){
     }
     const el = document.createElement('span'); el.textContent = part; box.appendChild(el);
     const n = norm(part);
-    if (n){ const i = tokens.length; tokens.push({el, n}); el.addEventListener('click', () => { pos = i; heard = 1e9; paint(true) }) }
+    if (n){ const i = tokens.length; tokens.push({el, n, name: /^[^A-Za-zÀ-ɏ]*[A-ZÀ-Þ]/.test(part)}); el.addEventListener('click', () => { pos = i; heard = 1e9; paint(true) }) }
   });
   pos = 0; paint(true);
 }
@@ -159,11 +159,14 @@ function matchAt(spoken, k, isLast){
   const w = spoken[k], exp = tokens[pos] && tokens[pos].n;
   if (!exp) return -1;
   if (sim(w, exp) || (isLast && w.length >= 3 && exp.startsWith(w))) return 0;
-  for (let j = 1; j <= 2 && pos + j < tokens.length; j++){            // recognizer dropped 1-2 words
+  // Bridge words the recognizer missed: up to 2 small words, or up to 4 capitalised
+  // words (names like Piet Oudolf, Michel Desvignes) that English recognition mangles.
+  for (let j = 1; j <= 4 && pos + j < tokens.length; j++){
     if (!sim(w, tokens[pos+j].n)) continue;
-    const skipped = tokens.slice(pos, pos+j).map(t => t.n);
-    const prevOk = k > 0 && sim(spoken[k-1], tokens[pos+j-1].n);
-    if (prevOk || skipped.every(x => x.length <= 3)) return j;
+    const skipped = tokens.slice(pos, pos+j);
+    const prevOk = j <= 2 && k > 0 && sim(spoken[k-1], tokens[pos+j-1].n);
+    const easy = skipped.every(t => t.n.length <= 3 || t.name);
+    if (prevOk || easy) return j;
   }
   return -1;
 }
